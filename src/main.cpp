@@ -2,6 +2,8 @@
 #include <omp.h>
 #include <iostream>
 #include "dataloader.h"
+#include "knn.h"
+#include "logistic_regression.h"
 
 int main(int argc, char** argv) {
     // 1. Initialize MPI
@@ -35,12 +37,34 @@ int main(int argc, char** argv) {
         // Call your Random Forest function here
     } 
     else if (rank == 1) {
-        std::cout << "[RANK 1] starting Logistic Regression training..." << std::endl;
-        // Call your Logistic Regression function here
+        std::cout << "[RANK 1] Logistic Regression Engine loading data..." << std::endl;
+        std::vector<DataRow> lrData = loadCSV("data/cleaned_tuesday.csv");
+        
+        if (!lrData.empty()) {
+            std::cout << "[RANK 1] Training Model (Gradient Descent)..." << std::endl;
+            Model myModel = trainLogisticRegression(lrData, 10, 0.01);
+            
+            int pred = predictLR(myModel, lrData[0].features);
+            std::cout << "[RANK 1] Prediction: " << pred << std::endl;
+        }
     }
-    else if (rank == 2) {
-        std::cout << "[RANK 2] starting K-Nearest Neighbors training..." << std::endl;
-        // Call your KNN function here
+  else if (rank == 2) {
+        std::cout << "[RANK 2] K-NN Engine active. Loading data..." << std::endl;
+        std::vector<DataRow> trainData = loadCSV("data/cleaned_tuesday.csv");
+
+        if(!trainData.empty()) {
+            // Let's test K-NN with the first row as a 'new' packet
+            std::vector<double> testPacket = trainData[0].features;
+            int actualLabel = std::stoi(trainData[0].label);
+
+            std::cout << "[RANK 2] Classifying test packet..." << std::endl;
+            
+            // Run K-NN with k=3
+            int prediction = predictKNN(trainData, testPacket, 3);
+
+            std::cout << "[RANK 2] Prediction: " << prediction 
+                      << " | Actual: " << actualLabel << std::endl;
+        }
     }
 
     // 4. Close MPI
