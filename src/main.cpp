@@ -1,12 +1,13 @@
 #include <mpi.h>
 #include <omp.h>
 #include <iostream>
+#include <vector>
 #include "dataloader.h"
 #include "knn.h"
 #include "logistic_regression.h"
+#include "random_forest.h"
 
 int main(int argc, char** argv) {
-    // 1. Initialize MPI
     MPI_Init(&argc, &argv);
 
     int rank, size;
@@ -14,60 +15,74 @@ int main(int argc, char** argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     if (size < 3) {
-        if (rank == 0) std::cout << "This project requires 3 ranks (0: RF, 1: LR, 2: KNN)" << std::endl;
+        if (rank == 0) std::cout << "Error: This project requires at least 3 ranks." << std::endl;
         MPI_Finalize();
         return 0;
     }
 
-    // 2. Load the Cleaned Data
-    // In a real HPC scenario, Rank 0 might load and scatter, 
-    // but for now, each rank loads its own copy for simplicity.
-    std::string path = "data/cleaned_tuesday.csv";
-    std::vector<DataRow> myData = loadCSV(path);
-
-    if (myData.empty()) {
-        std::cout << "Rank " << rank << " failed to load data." << std::endl;
-        MPI_Finalize();
-        return 0;
-    }
-
-    // 3. Assign Tasks
-    if (rank == 0) {
-        std::cout << "[RANK 0] starting Random Forest training on " << myData.size() << " rows..." << std::endl;
-        // Call your Random Forest function here
-    } 
-    else if (rank == 1) {
-        std::cout << "[RANK 1] Logistic Regression Engine loading data..." << std::endl;
+    // --- RANK 1: Logistic Regression ---
+    if (rank == 1) {
         std::vector<DataRow> lrData = loadCSV("data/cleaned_tuesday.csv");
+        Model myModel = trainLogisticRegression(lrData, 5, 0.01);
+        int prediction = predictLR(myModel, lrData[0].features);
+
+        // SEND prediction to Rank 0
+        MPI_Send(&prediction, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
+        std::cout << "[RANK 1] Sent prediction (" << prediction << ") to Rank 0" << std::endl;
+    }
+
+    // --- RANK 2: K-Nearest Neighbors ---
+    else if (rank == 2) {
+        std::vector<DataRow> knnData = loadCSV("data/cleaned_tuesday.csv");
+        int prediction = predictKNN(knnData, knnData[0].features, 3);
+
+        // SEND prediction to Rank 0
+        MPI_Send(&prediction, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
+        std::cout << "[RANK 2] Sent prediction (" << prediction << ") to Rank 0" << std::endl;
+    }
+
+    // --- RANK 0: Random Forest Worker & Aggregator ---
+    if (rank == 0) {
+        // A. WORKER TASK: Train and predict using Random Forest [cite: 47]
+        std::cout << "[RANK 0] Executing Random Forest training..." << std::endl;
+        std::vector<DataRow> rfData = loadCSV("data/cleaned_tuesday.csv");
         
-        if (!lrData.empty()) {
-            std::cout << "[RANK 1] Training Model (Gradient Descent)..." << std::endl;
-            Model myModel = trainLogisticRegression(lrData, 10, 0.01);
-            
-            int pred = predictLR(myModel, lrData[0].features);
-            std::cout << "[RANK 1] Prediction: " << pred << std::endl;
+        int rfVote = 0;
+        if (!rfData.empty()) {
+            // Predict on the first packet as a test
+            rfVote = predictRF(rfData, rfData[0].features);
+            std::cout << "[RANK 0] RF Local Prediction: " << rfVote << std::endl;
         }
-    }
-  else if (rank == 2) {
-        std::cout << "[RANK 2] K-NN Engine active. Loading data..." << std::endl;
-        std::vector<DataRow> trainData = loadCSV("data/cleaned_tuesday.csv");
 
-        if(!trainData.empty()) {
-            // Let's test K-NN with the first row as a 'new' packet
-            std::vector<double> testPacket = trainData[0].features;
-            int actualLabel = std::stoi(trainData[0].label);
+        // B. AGGREGATOR TASK: Collect votes via MPI_Recv [cite: 48, 56]
+        int vote1, vote2;
+        std::cout << "[RANK 0] Waiting for Rank 1 (LR) and Rank 2 (KNN)..." << std::endl;
+        
+        // Receive from Rank 1 (Logistic Regression) [cite: 56]
+        MPI_Recv(&vote1, 1, MPI_INT, 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        
+        // Receive from Rank 2 (K-NN) [cite: 56]
+        MPI_Recv(&vote2, 1, MPI_INT, 2, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-            std::cout << "[RANK 2] Classifying test packet..." << std::endl;
-            
-            // Run K-NN with k=3
-            int prediction = predictKNN(trainData, testPacket, 3);
+        // C. ENSEMBLE DECISION: Majority Vote (2 out of 3) [cite: 9, 57]
+        int totalAttackVotes = rfVote + vote1 + vote2;
 
-            std::cout << "[RANK 2] Prediction: " << prediction 
-                      << " | Actual: " << actualLabel << std::endl;
+        std::cout << "\n=====================================" << std::endl;
+        std::cout << "   HETEROGENEOUS ENSEMBLE REPORT     " << std::endl;
+        std::cout << "=====================================" << std::endl;
+        std::cout << "RF Vote (Rank 0): " << rfVote << std::endl;
+        std::cout << "LR Vote (Rank 1): " << vote1 << std::endl;
+        std::cout << "KNN Vote (Rank 2): " << vote2 << std::endl;
+        std::cout << "-------------------------------------" << std::endl;
+
+        if (totalAttackVotes >= 2) {
+            std::cout << "FINAL VERDICT: ATTACK DETECTED! 🚨" << std::endl;
+        } else {
+            std::cout << "FINAL VERDICT: TRAFFIC IS BENIGN. ✅" << std::endl;
         }
+        std::cout << "=====================================\n" << std::endl;
     }
 
-    // 4. Close MPI
     MPI_Finalize();
     return 0;
 }
