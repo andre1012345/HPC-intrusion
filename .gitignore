@@ -1,0 +1,9 @@
+# Ignore compiled binaries and object files
+bin/
+
+# Ignore all CSV data (too large for GitHub)
+data/*.csv
+
+# Ignore Python cache
+__pycache__/
+.vscode/
